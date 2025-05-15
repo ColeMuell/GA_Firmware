@@ -149,15 +149,15 @@ typedef struct axisVariables
 #define DIR_Z(dir) (~dir & 0x01)
 
 // Timer macros
-#define STOP_TIM(axis) 	(Axes[A].Timer->CR1 &= (~((uint8_t)TIM_CR1_CEN)))
-#define START_TIM(axis) (Axes[A].Timer->CR1 |= TIM_CR1_CEN)
-#define RST_TIM(axis) 	(Axes[A].Timer->CNT = 0)
-#define LIM_TIM(axis) 	(Axes[A].Timer->ARR)
+#define STOP_TIM(A) 	(Axes[A].Timer->CR1 &= (~((uint8_t)TIM_CR1_CEN)))
+#define START_TIM(A) (Axes[A].Timer->CR1 |= TIM_CR1_CEN)
+#define RST_TIM(A) 	(Axes[A].Timer->CNT = 0)
+#define LIM_TIM(A) 	(Axes[A].Timer->ARR)
 
 // Movement flag macros
-#define SET_MFLAG(axis) (Flags = Flags | Axes[A].MovementMask)
-#define RST_MFLAG(axis) (Flags = Flags & ~Axes[A].MovementMask)
-#define TST_MFLAG(axis) (Flags & Axes[A].MovementMask)
+#define SET_MFLAG(A) (Flags = Flags | Axes[A].MovementMask)
+#define RST_MFLAG(A) (Flags = Flags & ~Axes[A].MovementMask)
+#define TST_MFLAG(A) (Flags & Axes[A].MovementMask)
 #define TST_MFLAG_ALL() (Flags & (AxisFlagMasks[X]+AxisFlagMasks[Y]+AxisFlagMasks[Z]))
 
 // Communication flag macros

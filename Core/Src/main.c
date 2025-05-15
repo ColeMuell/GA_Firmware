@@ -67,6 +67,37 @@ typedef enum GcodeFirstByte
 
 } GcodeCMD;
 
+typedef struct axisVariables
+{
+    Axis Axis;
+
+    TIM_TypeDef* Timer;
+
+    uint8_t MovementMask;
+
+    uint32_t DefaultLimit;
+    float Millimeters;
+    float DefaultMMtoStep;
+
+    uint16_t* Hall[2];
+    uint16_t* Hall2[2];
+
+    // Positioning variables for each axis
+    uint32_t CurPos;
+    uint32_t ReqPos;
+    uint32_t StampPos;
+
+    // Acceleration variables for each axis
+    Dirctn Dir;
+    uint16_t AccVal;
+
+    // Limits and conversions for each axis
+    // These values are theoretical and will be overwritten by homing
+    uint32_t Limit;
+    float MMtoStep;
+
+} ControlSystem;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -111,22 +142,22 @@ typedef enum GcodeFirstByte
 /* USER CODE BEGIN PM */
 
 // Acceleration equation
-#define GET_DELAY(A) (((ACC_END - AccVal[A]) * 20) + ACC_OFF)
+#define GET_DELAY(A) (((ACC_END - Axes[A].AccVal) * 20) + ACC_OFF)
 
 // Direction transformations
 #define DIR_X2(dir) (~dir & 0x01)
 #define DIR_Z(dir) (~dir & 0x01)
 
 // Timer macros
-#define STOP_TIM(axis) 	(AxisTimers[axis]->CR1 &= (~((uint8_t)TIM_CR1_CEN)))
-#define START_TIM(axis) (AxisTimers[axis]->CR1 |= TIM_CR1_CEN)
-#define RST_TIM(axis) 	(AxisTimers[axis]->CNT = 0)
-#define LIM_TIM(axis) 	(AxisTimers[axis]->ARR)
+#define STOP_TIM(axis) 	(Axes[A].Timer->CR1 &= (~((uint8_t)TIM_CR1_CEN)))
+#define START_TIM(axis) (Axes[A].Timer->CR1 |= TIM_CR1_CEN)
+#define RST_TIM(axis) 	(Axes[A].Timer->CNT = 0)
+#define LIM_TIM(axis) 	(Axes[A].Timer->ARR)
 
 // Movement flag macros
-#define SET_MFLAG(axis) (Flags = Flags | AxisFlagMasks[axis])
-#define RST_MFLAG(axis) (Flags = Flags & ~AxisFlagMasks[axis])
-#define TST_MFLAG(axis) (Flags & AxisFlagMasks[axis])
+#define SET_MFLAG(axis) (Flags = Flags | Axes[A].MovementMask)
+#define RST_MFLAG(axis) (Flags = Flags & ~Axes[A].MovementMask)
+#define TST_MFLAG(axis) (Flags & Axes[A].MovementMask)
 #define TST_MFLAG_ALL() (Flags & (AxisFlagMasks[X]+AxisFlagMasks[Y]+AxisFlagMasks[Z]))
 
 // Communication flag macros
@@ -165,9 +196,9 @@ const uint8_t AxisFlagMasks[AXES_NUM] = {X_MASK, Y_MASK, Z_MASK};
 TIM_TypeDef* AxisTimers[AXES_NUM] = {TIM14, TIM16, TIM17};
 
 // Default values before homing
-const uint32_t LimitDefault[AXES_NUM] = {0x12ffff, 0x4ffff, 685900};
-float LimitReal[AXES_NUM] = {5702.3, 1530.35, 438.15};
-const float MMtoStepDefault[AXES_NUM] = {214, 214, 1565.48442314};
+const uint32_t 	LimitDefault[AXES_NUM] = 	{0x12ffff, 0x4ffff, 685900};
+float 			LimitReal[AXES_NUM] = 		{5702.3,   1530.35, 438.15};
+const float	 	MMtoStepDefault[AXES_NUM] = {214,      214,     1565.48442314};
 
 // Buffer for ADC DMA to be mapped
 uint16_t ADC_DMA_Buf[ADC_NUM] = {0};
@@ -182,10 +213,6 @@ const uint16_t* HallNegX2 = 	ADC_DMA_Buf + 0;
 const uint16_t* HallNegX = ADC_DMA_Buf + 2;
 const uint16_t* HallNegY = 	ADC_DMA_Buf + 4;
 
-uint16_t* HallX2[2] = {ADC_DMA_Buf + 1, ADC_DMA_Buf + 0};
-uint16_t* HallX[2] = {ADC_DMA_Buf + 3, ADC_DMA_Buf + 2};
-uint16_t* HallY[2] = {ADC_DMA_Buf + 5, ADC_DMA_Buf + 4};
-
 // SPI variables
 uint8_t RX_Buffer [GCODE_BYTES] = {0};
 uint8_t TX_Buffer [CHECKSUM_BYTES] = {0};
@@ -193,19 +220,7 @@ uint8_t TX_Buffer [CHECKSUM_BYTES] = {0};
 volatile uint32_t RXcount = 0;
 volatile uint32_t TXcount = 0;
 
-// Positioning variables for each axis
-volatile uint32_t 	CurPos[AXES_NUM] = {0};
-uint32_t 			ReqPos[AXES_NUM] = {0};
-uint32_t 			Stamp[AXES_NUM] = {0};
-
-// Acceleration variables for each axis
-Dirctn   	Dir[AXES_NUM] = {0};
-uint16_t  	AccVal[AXES_NUM] = {0};
-
-// Limits and conversions for each axis
-// These values are theoretical and will be overwritten by homing
-uint32_t  	Limit[AXES_NUM] = {LimitDefault[X], LimitDefault[Y], LimitDefault[Z]};
-float  		MMtoStep[AXES_NUM] = {MMtoStepDefault[X], MMtoStepDefault[Y], MMtoStepDefault[Z]};
+ControlSystem Axes[AXES_NUM];
 
 // State machine variables
 MainStates MainState;
@@ -228,6 +243,8 @@ static void MX_ADC_Init(void);
 void GPIOWrite(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin, GPIO_PinState PinState);
 int GPIORead(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin);
 void GPIOToggle(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin);
+
+void InitAxis(Axis A);
 
 void Accelerate(Axis A);
 void Deccelerate(Axis A);
@@ -322,15 +339,14 @@ int main(void)
   for( Axis A = X; A < END; A++)
 	  STOP_TIM(A);
 
+
   // Initialize all variables
   for( Axis A = X; A < END; A++)
   {
+	  InitAxis(A);
+
 	  RST_TIM(A);
-	  AccVal[A] = ACC_START;
 	  LIM_TIM(A) = GET_DELAY(A);
-	  CurPos[A] = 0;
-	  ReqPos[A] = 0;
-	  Dir[A] = Pos;
   }
 
   MainState = Init;
@@ -454,13 +470,13 @@ int main(void)
 		  for( Axis A = X; A < END; A++)
 			  STOP_TIM(A);
 
-		  // Reset all timer variables
+		  // Initialize all variables
 		  for( Axis A = X; A < END; A++)
 		  {
+			  InitAxis(A);
+
 			  RST_TIM(A);
-			  AccVal[A] = ACC_START;
 			  LIM_TIM(A) = GET_DELAY(A);
-			  ReqPos[A] = CurPos[A];
 		  }
 
 		  MainState = Idle;
@@ -939,16 +955,66 @@ void GPIOToggle(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin)
 }
 
 /**
+  * @brief intitializes Axis control variables
+  * @param A 	The axis to apply to
+  * @retval None
+  */
+void InitAxis(Axis A)
+{
+	  Axes[A].Axis = A;
+	  Axes[A].Timer = AxisTimers[A];
+	  Axes[A].MovementMask = AxisFlagMasks[A];
+	  Axes[A].DefaultLimit = LimitDefault[A];
+	  Axes[A].Millimeters = LimitReal[A];
+	  Axes[A].DefaultMMtoStep = MMtoStepDefault[A];
+
+	  switch(A)
+	  {
+	  	  case X:
+			  Axes[A].Hall[Pos] = (uint16_t*)HallPosX;
+			  Axes[A].Hall[Neg] = (uint16_t*)HallNegX;
+			  Axes[A].Hall2[Pos] = (uint16_t*)HallPosX2;
+			  Axes[A].Hall2[Neg] = (uint16_t*)HallNegX2;
+	  		  break;
+
+	  	  case Y:
+			  Axes[A].Hall[Pos] = (uint16_t*)HallPosY;
+			  Axes[A].Hall[Neg] = (uint16_t*)HallNegY;
+			  Axes[A].Hall2[Pos] = (uint16_t*)HallPosY;
+			  Axes[A].Hall2[Neg] = (uint16_t*)HallNegY;
+	  		  break;
+
+	  	  case Z:
+			  Axes[A].Hall[Pos] = (uint16_t*)HallPosZ;
+			  Axes[A].Hall[Neg] = (uint16_t*)HallPosZ;
+			  Axes[A].Hall2[Pos] = (uint16_t*)HallPosZ;
+			  Axes[A].Hall2[Neg] = (uint16_t*)HallPosZ;
+	  		  break;
+
+	  	  default:
+	  		  break;
+	  }
+
+	  Axes[A].CurPos = 0;
+	  Axes[A].ReqPos = 0;
+	  Axes[A].StampPos = 0;
+	  Axes[A].Dir = Pos;
+	  Axes[A].AccVal = ACC_START;
+	  Axes[A].Limit = Axes[A].DefaultLimit;
+	  Axes[A].MMtoStep = Axes[A].DefaultMMtoStep;
+}
+
+/**
   * @brief Accelerates if applicable
   * @param A	The axis to apply to
   * @retval None
   */
 void Accelerate(Axis A)
 {
-	if(AccVal[A] >= ACC_END)
-		AccVal[A] = ACC_END;
+	if(Axes[A].AccVal >= ACC_END)
+		Axes[A].AccVal = ACC_END;
 	else
-		AccVal[A]++;
+		Axes[A].AccVal++;
 
 	return;
 }
@@ -960,10 +1026,10 @@ void Accelerate(Axis A)
   */
 void Deccelerate(Axis A)
 {
-	if(AccVal[A] <= ACC_START)
-		AccVal[A] = ACC_START;
+	if(Axes[A].AccVal <= ACC_START)
+		Axes[A].AccVal = ACC_START;
 	else
-		AccVal[A]--;
+		Axes[A].AccVal--;
 
 	return;
 }
@@ -978,7 +1044,7 @@ void SetDirection(Axis A)
 	switch(A)
 	{
 		case X:
-			if(Dir[X])
+			if(Axes[X].Dir)
 			{
 				GPIOWrite(dirX1_GPIO_Port, dirX1_Pin, Neg);
 				GPIOWrite(dirX2_GPIO_Port, dirX2_Pin, DIR_X2(Neg));
@@ -991,14 +1057,14 @@ void SetDirection(Axis A)
 			break;
 
 		case Y:
-			if(Dir[Y])
+			if(Axes[Y].Dir)
 				GPIOWrite(dirY_GPIO_Port,  dirY_Pin,  Neg);
 			else
 				GPIOWrite(dirY_GPIO_Port,  dirY_Pin,  Pos);
 			break;
 
 		case Z:
-			if(Dir[Z])
+			if(Axes[Z].Dir)
 				GPIOWrite(dirZ_GPIO_Port,  dirZ_Pin,  DIR_Z(Neg));
 			else
 				GPIOWrite(dirZ_GPIO_Port,  dirZ_Pin,  DIR_Z(Pos));
@@ -1016,18 +1082,18 @@ void SetDirection(Axis A)
   */
 void LowAccelerationHandle(Axis A)
 {
-	if(abs((int)CurPos[A] - (int)Stamp[A]) > ACC_STEPS)
+	if(abs((int)Axes[A].CurPos - (int)Axes[A].StampPos) > ACC_STEPS)
 	{
-		if(abs((int)ReqPos[A] - (int)CurPos[A]) > AccVal[A])
+		if(abs((int)Axes[A].ReqPos - (int)Axes[A].CurPos) > Axes[A].AccVal)
 		{
-			if(AccVal[A] <= ACC_END_LOW)
+			if(Axes[A].AccVal <= ACC_END_LOW)
 				Accelerate(A);
 		}
 		else
 			Deccelerate(A);
 
 	  LIM_TIM(A) =  GET_DELAY(A);
-	  Stamp[A] = CurPos[A];
+	  Axes[A].StampPos = Axes[A].CurPos;
 	}
 }
 
@@ -1038,15 +1104,15 @@ void LowAccelerationHandle(Axis A)
   */
 void MaxAccelerationHandle(Axis A)
 {
-	if(abs((int)CurPos[A] - (int)Stamp[A]) > ACC_STEPS)
+	if(abs((int)Axes[A].CurPos - (int)Axes[A].StampPos) > ACC_STEPS)
 	{
-	  if(abs((int)ReqPos[A] - (int)CurPos[A]) > AccVal[A] * ACC_STEPS)
+	  if(abs((int)Axes[A].ReqPos - (int)Axes[A].CurPos) > Axes[A].AccVal * ACC_STEPS)
 			Accelerate(A);
 		else
 			Deccelerate(A);
 
 	  LIM_TIM(A) =  GET_DELAY(A);
-	  Stamp[A] = CurPos[A];
+	  Axes[A].StampPos = Axes[A].CurPos;
 	}
 }
 
@@ -1062,16 +1128,16 @@ void HomeAxis(Axis A)
 		case X:
 
 			// Set requested position to reasonably theoretical limit in the positive direction
-			CurPos[X] = 0;
-			ReqPos[X] = LimitDefault[X];
+			Axes[X].CurPos = 0;
+			Axes[X].ReqPos = Axes[X].DefaultLimit;
 			SET_MFLAG(X);
 
-			Dir[X] = Pos;
+			Axes[X].Dir = Pos;
 			SetDirection(X);
 
 			// Reset movement values and start timer
-			AccVal[X] = ACC_START;
-			Stamp[X] = CurPos[X];
+			Axes[X].AccVal = ACC_START;
+			Axes[X].StampPos = Axes[X].CurPos;
 
 			RST_TIM(X);
 			LIM_TIM(X) =  GET_DELAY(X);
@@ -1090,15 +1156,15 @@ void HomeAxis(Axis A)
 			STOP_TIM(X);
 
 			// Set current position to reasonably theoretical limit and move in the negative direction
-			CurPos[X] = LimitDefault[X];
-			ReqPos[X] = 0;
+			Axes[X].CurPos = Axes[X].DefaultLimit;
+			Axes[X].ReqPos = 0;
 
-			Dir[X] = Neg;
+			Axes[X].Dir = Neg;
 			SetDirection(X);
 
 			// Reset movement values and start timer
-			AccVal[X] = ACC_START;
-			Stamp[X] = CurPos[X];
+			Axes[X].AccVal = ACC_START;
+			Axes[X].StampPos = Axes[X].CurPos;
 
 			RST_TIM(X);
 			LIM_TIM(X) =  GET_DELAY(X);
@@ -1118,10 +1184,10 @@ void HomeAxis(Axis A)
 			STOP_TIM(X);
 
 			// Calculate the exact limit and ratio and set position to 0
-			Limit[X] = LimitDefault[X]; - CurPos[X];
-			MMtoStep[X] = Limit[X] / LimitReal[X];
+			Axes[X].Limit = Axes[X].DefaultLimit; - Axes[X].CurPos;
+			Axes[X].MMtoStep = Axes[X].Limit / Axes[X].Millimeters;
 
-			CurPos[X] = 0;
+			Axes[X].CurPos = 0;
 
 			RST_MFLAG(X);
 
@@ -1130,16 +1196,16 @@ void HomeAxis(Axis A)
 		case Y:
 
 			// Set requested position to reasonably theoretical limit in the positive direction
-			CurPos[Y] = 0;
-			ReqPos[Y] = LimitDefault[Y];
+			Axes[Y].CurPos = 0;
+			Axes[Y].ReqPos = Axes[Y].DefaultLimit;
 			SET_MFLAG(Y);
 
-			Dir[Y] = Pos;
+			Axes[Y].Dir = Pos;
 			SetDirection(Y);
 
 			// Reset movement values and start timer
-			AccVal[Y] = ACC_START;
-			Stamp[Y] = CurPos[Y];
+			Axes[Y].AccVal = ACC_START;
+			Axes[Y].StampPos = Axes[Y].CurPos;
 
 			RST_TIM(Y);
 			LIM_TIM(Y) =  GET_DELAY(Y);
@@ -1158,15 +1224,15 @@ void HomeAxis(Axis A)
 			STOP_TIM(Y);
 
 			// Set current position to reasonably theoretical limit and move in the negative direction
-			CurPos[Y] = LimitDefault[Y];
-			ReqPos[Y] = 0;
+			Axes[Y].CurPos = Axes[Y].DefaultLimit;
+			Axes[Y].ReqPos = 0;
 
-			Dir[Y] = Neg;
+			Axes[Y].Dir = Neg;
 			SetDirection(Y);
 
 			// Reset movement values and start timer
-			AccVal[Y] = ACC_START;
-			Stamp[Y] = CurPos[Y];
+			Axes[Y].AccVal = ACC_START;
+			Axes[Y].StampPos = Axes[Y].CurPos;
 
 			RST_TIM(Y);
 			LIM_TIM(Y) =  GET_DELAY(Y);
@@ -1187,11 +1253,10 @@ void HomeAxis(Axis A)
 			STOP_TIM(Y);
 
 			// Calculate the exact limit and ratio and set position to 0
-			Limit[Y] = LimitDefault[Y] - CurPos[Y];
+			Axes[Y].Limit = Axes[Y].DefaultLimit - Axes[Y].CurPos;
+			Axes[Y].MMtoStep = Axes[Y].Limit / Axes[Y].Millimeters;
 
-			MMtoStep[Y] = Limit[Y] / LimitReal[Y];
-
-			CurPos[Y] = 0;
+			Axes[Y].CurPos = 0;
 
 			RST_MFLAG(Y);
 
@@ -1200,16 +1265,16 @@ void HomeAxis(Axis A)
 		case Z:
 
 			// Set current position to reasonably theoretical limit and move in the negative direction
-			CurPos[Z] = LimitDefault[Z];
-			ReqPos[Z] = 0;
+			Axes[Z].CurPos = Axes[Z].DefaultLimit;
+			Axes[Z].ReqPos = 0;
 			SET_MFLAG(Z);
 
-			Dir[Z] = Neg;
+			Axes[Z].Dir = Neg;
 			SetDirection(Z);
 
 			// Reset movement values and start timer
-			AccVal[Z] = ACC_START;
-			Stamp[Z] = CurPos[Z];
+			Axes[Z].AccVal = ACC_START;
+			Axes[Z].StampPos = Axes[Z].CurPos;
 
 			RST_TIM(Z);
 			LIM_TIM(Z) =  GET_DELAY(Z);
@@ -1227,11 +1292,11 @@ void HomeAxis(Axis A)
 
 			STOP_TIM(Z);
 
-			Limit[Z] = LimitDefault[Z];
-			MMtoStep[Z] = Limit[Z] / LimitReal[Z];
+			Axes[Z].Limit = Axes[Z].DefaultLimit;
+			Axes[Z].MMtoStep = Axes[Z].Limit / Axes[Z].Millimeters;
 
 			// Set position to 0
-			CurPos[Z] = 0;
+			Axes[Z].CurPos = 0;
 
 			RST_MFLAG(Z);
 
@@ -1250,21 +1315,21 @@ void HomeAxis(Axis A)
 void StopCheck(Axis A)
 {
 	// Direction determines the logical operation that determines if we've met or passed the requested position
-	if(Dir[A])
+	if(Axes[A].Dir)
 	{
-	  if(CurPos[A] <= ReqPos[A])
+	  if(Axes[A].CurPos <= Axes[A].ReqPos)
 	  {
 		  STOP_TIM(A);
-		  AccVal[A] = 0;
+		  Axes[A].AccVal = 0;
 		  RST_MFLAG(A);
 	  }
 	}
 	else
 	{
-	  if(CurPos[A] >= ReqPos[A])
+	  if(Axes[A].CurPos >= Axes[A].ReqPos)
 	  {
 		  STOP_TIM(A);
-		  AccVal[A] = 0;
+		  Axes[A].AccVal = 0;
 		  RST_MFLAG(A);
 	  }
 	}
@@ -1277,34 +1342,12 @@ void StopCheck(Axis A)
   */
 void StopCheckHall(Axis A)
 {
-	switch(A)
+
+	if(*(Axes[A].Hall[Axes[A].Dir]) < HALL_LOW  && *(Axes[A].Hall2[Axes[A].Dir]) < HALL_LOW )
 	{
-		case X:
-			if(*HallX[Dir[A]] < HALL_LOW  && *HallX2[Dir[X]] < HALL_LOW )
-			{
-				  STOP_TIM(A);
-				  AccVal[A] = 0;
-				  RST_MFLAG(A);
-			}
-			break;
-
-		case Y:
-			if(*HallY[Dir[A]] < HALL_LOW )
-			{
-				  STOP_TIM(A);
-				  AccVal[A] = 0;
-				  RST_MFLAG(A);
-			}
-			break;
-
-		case Z:
-			if(*HallPosZ < HALL_LOW && Dir[A] == Pos)
-			{
-				  STOP_TIM(A);
-				  AccVal[A] = 0;
-				  RST_MFLAG(A);
-			}
-			break;
+		  STOP_TIM(A);
+		  Axes[A].AccVal = 0;
+		  RST_MFLAG(A);
 	}
 }
 
@@ -1316,17 +1359,17 @@ void StopCheckHall(Axis A)
 void RequestCheck(Axis A)
 {
 	// If the position is off by more than one half a MM, set movement flags
-	if(abs((int)CurPos[A] - (int)ReqPos[A]) > (MMtoStep[A] / 2))
+	if(abs((int)Axes[A].CurPos - (int)Axes[A].ReqPos) > (Axes[A].MMtoStep / 2))
 	{
-	  if(CurPos[A] > ReqPos[A])
-		  Dir[A] = Neg;
+	  if(Axes[A].CurPos > Axes[A].ReqPos)
+		  Axes[A].Dir = Neg;
 	  else
-		  Dir[A] = Pos;
+		  Axes[A].Dir = Pos;
 
 	  SetDirection(A);
 
-	  AccVal[A] = ACC_START;
-	  Stamp[A] = CurPos[A];
+	  Axes[A].AccVal = ACC_START;
+	  Axes[A].StampPos = Axes[A].CurPos;
 
 	  SET_MFLAG(A);
 
@@ -1342,7 +1385,7 @@ void RequestCheck(Axis A)
   */
 uint32_t GetSPICrd(Axis A)
 {
-	return (uint32_t)(((RX_Buffer[(2*A) + 2] & 0x7) << 8) + RX_Buffer[(2*A) + 3]) * MMtoStep[A];
+	return (uint32_t)(((RX_Buffer[(2*A) + 2] & 0x7) << 8) + RX_Buffer[(2*A) + 3]) * Axes[A].MMtoStep;
 }
 
 /**
@@ -1360,29 +1403,29 @@ void ParseGCode(void)
 
 		case Abs:
 
-			ReqPos[X] = GetSPICrd(X);
-			ReqPos[Y] = GetSPICrd(Y);
-			ReqPos[Z] = GetSPICrd(Z);
+			Axes[X].ReqPos = GetSPICrd(X);
+			Axes[Y].ReqPos = GetSPICrd(Y);
+			Axes[Z].ReqPos = GetSPICrd(Z);
 
 			break;
 
 		case Rel:
 
 			if(RX_Buffer[2] & 0x80)
-				ReqPos[X] -= GetSPICrd(X);
+				Axes[X].ReqPos -= GetSPICrd(X);
 			else
-				ReqPos[X] += GetSPICrd(X);
+				Axes[X].ReqPos += GetSPICrd(X);
 
 			if(RX_Buffer[4] & 0x80)
-				ReqPos[Y] -= GetSPICrd(Y);
+				Axes[Y].ReqPos -= GetSPICrd(Y);
 			else
-				ReqPos[Y] += GetSPICrd(Y);
+				Axes[Y].ReqPos += GetSPICrd(Y);
 
 
 			if(RX_Buffer[6] & 0x80)
-				ReqPos[Z] -= GetSPICrd(Z);
+				Axes[Z].ReqPos -= GetSPICrd(Z);
 			else
-				ReqPos[Z] += GetSPICrd(Z);
+				Axes[Z].ReqPos += GetSPICrd(Z);
 
 
 			break;
@@ -1398,10 +1441,10 @@ void ParseGCode(void)
 
 	// Assure that requested position did not overflow or go out of range
 	for(Axis A = X; A < END; A++)
-		if(ReqPos[A] & LIM_POS)
-			ReqPos[A] = 0;
-		else if (ReqPos[A] > Limit[A])
-			ReqPos[A] = Limit[A];
+		if(Axes[A].ReqPos & LIM_POS)
+			Axes[A].ReqPos = 0;
+		else if (Axes[A].ReqPos > Axes[A].Limit)
+			Axes[A].ReqPos = Axes[A].Limit;
 }
 
 /**
@@ -1451,20 +1494,20 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	{
 		StopCheckHall(X);
 
-		if(*(HallX[Dir[X]]) > HALL_LOW )
+		if(*(Axes[X].Hall[Axes[X].Dir]) > HALL_LOW)
 			GPIOToggle(pulX1_GPIO_Port, pulX1_Pin);
 
-		if(*(HallX2[Dir[X]]) > HALL_LOW )
+		if(*(Axes[X].Hall2[Axes[X].Dir]) > HALL_LOW)
 			GPIOToggle(pulX2_GPIO_Port, pulX2_Pin);
 
-		if(Dir[X])
-			CurPos[X]--;
+		if(Axes[X].Dir)
+			Axes[X].CurPos--;
 		else
-			CurPos[X]++;
+			Axes[X].CurPos++;
 
 
-		if(CurPos[X] & LIM_POS)
-			CurPos[X] = 0;
+		if(Axes[X].CurPos & LIM_POS)
+			Axes[X].CurPos = 0;
 
 		StopCheck(X);
 
@@ -1476,13 +1519,13 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 		GPIOToggle(pulY_GPIO_Port,  pulY_Pin);
 
-		if(Dir[Y])
-			CurPos[Y]--;
+		if(Axes[Y].Dir)
+			Axes[Y].CurPos--;
 		else
-			CurPos[Y]++;
+			Axes[Y].CurPos++;
 
-		if(CurPos[Y] & LIM_POS)
-			CurPos[Y] = 0;
+		if(Axes[Y].CurPos & LIM_POS)
+			Axes[Y].CurPos = 0;
 
 		StopCheck(Y);
 
@@ -1494,13 +1537,13 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 		GPIOToggle(pulZ_GPIO_Port,  pulZ_Pin);
 
-		if(Dir[Z])
-			CurPos[Z]--;
+		if(Axes[Z].Dir)
+			Axes[Z].CurPos--;
 		else
-			CurPos[Z]++;
+			Axes[Z].CurPos++;
 
-		if(CurPos[Z] & LIM_POS)
-			CurPos[Z] = 0;
+		if(Axes[Z].CurPos & LIM_POS)
+			Axes[Z].CurPos = 0;
 
 		StopCheck(Z);
 

@@ -77,7 +77,7 @@ typedef struct axisVariables
 
     uint32_t DefaultLimit;
     float Millimeters;
-    float DefaultMMtoStep;
+    float DefaultStepPerMM;
 
     uint16_t* Hall[2];
     uint16_t* Hall2[2];
@@ -94,7 +94,7 @@ typedef struct axisVariables
     // Limits and conversions for each axis
     // These values are theoretical and will be overwritten by homing
     uint32_t Limit;
-    float MMtoStep;
+    float StepPerMM;
 
 } ControlSystem;
 
@@ -193,25 +193,24 @@ TIM_HandleTypeDef htim17;
 const uint8_t AxisFlagMasks[AXES_NUM] = {X_MASK, Y_MASK, Z_MASK};
 
 // Assigning timer addresses for each axis
-TIM_TypeDef* AxisTimers[AXES_NUM] = {TIM14, TIM16, TIM17};
+const TIM_TypeDef* AxisTimers[AXES_NUM] = {TIM14, TIM16, TIM17};
 
 // Default values before homing
 const uint32_t 	LimitDefault[AXES_NUM] = 	{0x12ffff, 0x4ffff, 685900};
 float 			LimitReal[AXES_NUM] = 		{5702.3,   1530.35, 438.15};
-const float	 	MMtoStepDefault[AXES_NUM] = {214,      214,     1565.48442314};
+const float	 	StepPerMMDefault[AXES_NUM] = {214,      214,     1565.48442314};
 
 // Buffer for ADC DMA to be mapped
 uint16_t ADC_DMA_Buf[ADC_NUM] = {0};
 
 // Assigning sensor addresses from the buffer
-const uint16_t* HallPosX2 = 	ADC_DMA_Buf + 1;
-const uint16_t* HallPosX = ADC_DMA_Buf + 3;
+const uint16_t* HallNegX2 = ADC_DMA_Buf + 0;
+const uint16_t* HallPosX2 = ADC_DMA_Buf + 1;
+const uint16_t* HallNegX = 	ADC_DMA_Buf + 2;
+const uint16_t* HallPosX = 	ADC_DMA_Buf + 3;
+const uint16_t* HallNegY = 	ADC_DMA_Buf + 4;
 const uint16_t* HallPosY = 	ADC_DMA_Buf + 5;
 const uint16_t* HallPosZ = 	ADC_DMA_Buf + 6;
-
-const uint16_t* HallNegX2 = 	ADC_DMA_Buf + 0;
-const uint16_t* HallNegX = ADC_DMA_Buf + 2;
-const uint16_t* HallNegY = 	ADC_DMA_Buf + 4;
 
 // SPI variables
 uint8_t RX_Buffer [GCODE_BYTES] = {0};
@@ -962,11 +961,11 @@ void GPIOToggle(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin)
 void InitAxis(Axis A)
 {
 	  Axes[A].Axis = A;
-	  Axes[A].Timer = AxisTimers[A];
+	  Axes[A].Timer = (TIM_TypeDef*)AxisTimers[A];
 	  Axes[A].MovementMask = AxisFlagMasks[A];
 	  Axes[A].DefaultLimit = LimitDefault[A];
 	  Axes[A].Millimeters = LimitReal[A];
-	  Axes[A].DefaultMMtoStep = MMtoStepDefault[A];
+	  Axes[A].DefaultStepPerMM = StepPerMMDefault[A];
 
 	  switch(A)
 	  {
@@ -1001,7 +1000,7 @@ void InitAxis(Axis A)
 	  Axes[A].Dir = Pos;
 	  Axes[A].AccVal = ACC_START;
 	  Axes[A].Limit = Axes[A].DefaultLimit;
-	  Axes[A].MMtoStep = Axes[A].DefaultMMtoStep;
+	  Axes[A].StepPerMM = Axes[A].DefaultStepPerMM;
 }
 
 /**
@@ -1184,8 +1183,8 @@ void HomeAxis(Axis A)
 			STOP_TIM(X);
 
 			// Calculate the exact limit and ratio and set position to 0
-			Axes[X].Limit = Axes[X].DefaultLimit; - Axes[X].CurPos;
-			Axes[X].MMtoStep = Axes[X].Limit / Axes[X].Millimeters;
+			Axes[X].Limit = Axes[X].DefaultLimit - Axes[X].CurPos;
+			Axes[X].StepPerMM = Axes[X].Limit / Axes[X].Millimeters;
 
 			Axes[X].CurPos = 0;
 
@@ -1249,12 +1248,11 @@ void HomeAxis(Axis A)
 			}
 
 
-
 			STOP_TIM(Y);
 
 			// Calculate the exact limit and ratio and set position to 0
 			Axes[Y].Limit = Axes[Y].DefaultLimit - Axes[Y].CurPos;
-			Axes[Y].MMtoStep = Axes[Y].Limit / Axes[Y].Millimeters;
+			Axes[Y].StepPerMM = Axes[Y].Limit / Axes[Y].Millimeters;
 
 			Axes[Y].CurPos = 0;
 
@@ -1293,7 +1291,7 @@ void HomeAxis(Axis A)
 			STOP_TIM(Z);
 
 			Axes[Z].Limit = Axes[Z].DefaultLimit;
-			Axes[Z].MMtoStep = Axes[Z].Limit / Axes[Z].Millimeters;
+			Axes[Z].StepPerMM = Axes[Z].Limit / Axes[Z].Millimeters;
 
 			// Set position to 0
 			Axes[Z].CurPos = 0;
@@ -1359,7 +1357,7 @@ void StopCheckHall(Axis A)
 void RequestCheck(Axis A)
 {
 	// If the position is off by more than one half a MM, set movement flags
-	if(abs((int)Axes[A].CurPos - (int)Axes[A].ReqPos) > (Axes[A].MMtoStep / 2))
+	if(abs((int)Axes[A].CurPos - (int)Axes[A].ReqPos) > (Axes[A].StepPerMM / 2))
 	{
 	  if(Axes[A].CurPos > Axes[A].ReqPos)
 		  Axes[A].Dir = Neg;
@@ -1385,7 +1383,7 @@ void RequestCheck(Axis A)
   */
 uint32_t GetSPICrd(Axis A)
 {
-	return (uint32_t)(((RX_Buffer[(2*A) + 2] & 0x7) << 8) + RX_Buffer[(2*A) + 3]) * Axes[A].MMtoStep;
+	return (uint32_t)(((RX_Buffer[(2*A) + 2] & 0x7) << 8) + RX_Buffer[(2*A) + 3]) * Axes[A].StepPerMM;
 }
 
 /**
@@ -1490,7 +1488,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	// Check the timer instance and toggle the appropriate axis
 	// Additionally increment and evaluate the current position
 
-	if(htim->Instance == AxisTimers[X])
+	if(htim->Instance == Axes[X].Timer)
 	{
 		StopCheckHall(X);
 
@@ -1513,7 +1511,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 		return;
 	}
-	else if(htim->Instance == AxisTimers[Y])
+	else if(htim->Instance == Axes[Y].Timer)
 	{
 		StopCheckHall(Y);
 
@@ -1531,7 +1529,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 		return;
 	}
-	else if(htim->Instance == AxisTimers[Z])
+	else if(htim->Instance == Axes[Z].Timer)
 	{
 		StopCheckHall(Z);
 
